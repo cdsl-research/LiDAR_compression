@@ -17,22 +17,15 @@ receive_dataというファイルに解凍結果を出力します．
 
 # 実行結果
 client.pyでは以下のような表示されます．
-```
-圧縮元ファイルサイズ: 12.79 MB  
-圧縮後のサイズ: 876.54 KB  
-圧縮率: 6.69%  
-```
+
+![image](https://github.com/user-attachments/assets/591c14ee-22e7-46e3-8a91-924db612436f)
+
 
 server.pyでは実行すると以下のようなサーバーが立ち上がった旨の表示があります．
-```
-INFO:     Started server process [93104] 
-INFO:     Waiting for application startup.  
-INFO:     Application startup complete.  
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)  
-```
+
+![image](https://github.com/user-attachments/assets/bf2ca20b-dd2f-4531-b434-ee08a2bdc1b7)
+
 その後，client.pyを実行すると以下のような表示が出力されreceive_data.txtに解凍結果が出力されます．  
-```（一部抜粋）  
-INFO:root:サーバー側のハッシュ: 78ee13094cd1a033a70ed9b529d857e6  
-INFO:root:クライアント側のハッシュ: 78ee13094cd1a033a70ed9b529d857e6  
-INFO:root:ハッシュ一致: 一致  
-```
+
+![image](https://github.com/user-attachments/assets/e45751ee-65c5-423f-999d-ce7266029efc)
+

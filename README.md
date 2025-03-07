@@ -32,6 +32,7 @@ client.pyでは以下のような表示されます．
 info.logの一部
 ![image](client_info_log.png)
 
+
 error.logの一部
 ![image](client_error_log.png)
 

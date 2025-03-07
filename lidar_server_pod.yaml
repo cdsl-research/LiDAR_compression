@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: lidar-server
+  labels:
+    app: lidar-server
+spec:
+  nodeName: nisl-2
+  containers:
+    - name: python-server
+      image: c0a2201673/lidar-server:latest  # 先ほどプッシュしたDockerイメージ
+      env:
+      - name: TZ
+        value: "Asia/Tokyo"
+      ports:
+        - containerPort: 8000
+        - containerPort: 8001
+        - containerPort: 8002
+      volumeMounts:
+        - name: logs-volume
+          mountPath: /app/logs
+  volumes:
+    - name: logs-volume
+      emptyDir: {}  # 空のディレクトリを一時的に使用

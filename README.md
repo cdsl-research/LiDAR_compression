@@ -32,18 +32,31 @@ client.pyでは以下のような表示されます．
 
 info.logの一部
 
-![image](client_info_log.png)
+![image](images/client_info_log.png)
 
 
 error.logの一部
 
 ![image](client_error_log.png)
 
-server.pyでは実行すると以下のようなサーバーが立ち上がった旨の表示があります．
+server.pyでは実行すると以下のような出力がされます．
 
-![image](https://github.com/user-attachments/assets/bf2ca20b-dd2f-4531-b434-ee08a2bdc1b7)
+info.logの一部
 
-その後，client.pyを実行すると以下のような表示が出力されreceive_data.txtに解凍結果が出力されます．  
+![image](server_info_log.png)
 
-![image](https://github.com/user-attachments/assets/e45751ee-65c5-423f-999d-ce7266029efc)
 
+error.logの一部
+![image](server_error_log.png)
+
+
+client.pyとserver.pyを実行すると以下のような表示が8001，8002番ポートに出力されます．  
+
+8001番ポート
+
+![image]()
+
+
+8002番ポート
+
+![image]()

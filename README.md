@@ -39,6 +39,8 @@ error.logの一部
 
 ![image](images/client_error_log.png)
 
+
+
 server.pyでは実行すると以下のような出力がされます．
 
 info.logの一部
@@ -47,7 +49,9 @@ info.logの一部
 
 
 error.logの一部
+
 ![image](images/server_error_log.png)
+
 
 
 client.pyとserver.pyを実行すると以下のような表示が8001，8002番ポートに出力されます．  

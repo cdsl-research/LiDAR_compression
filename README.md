@@ -28,7 +28,8 @@ server.pyをKubernetes上で動作させるためのserviceを起動するため
 このファイルにはLiDARデータ1周分が記録されています．
 
 # 実行結果
-client.pyでは以下のような表示されます．
+client.pyでは以下のような表示されます．\n
+
 info.logの一部
 ![image](client_info_log.png)
 

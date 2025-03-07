@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: lidar-server-svc
+spec:
+  type: LoadBalancer
+  selector:
+    app: lidar-server
+  ports:
+    - name: http-port
+      protocol: TCP
+      port: 8000
+      targetPort: 8000
+    - name: lidar-data-port
+      protocol: TCP
+      port: 8001
+      targetPort: 8001
+    - name: time-delay-port
+      protocol: TCP
+      port: 8002
+      targetPort: 8002

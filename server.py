@@ -1,153 +1,324 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from motor.motor_asyncio import AsyncIOMotorClient
-from bson.binary import Binary
-import hashlib
-import traceback
-import os
+import logging.handlers
+import socket
+import threading
+import struct
+import time
+import datetime
 import logging
+import os
 
-app = FastAPI()
+monitor_lidar_data_clients = []  # Lidarデータ監視用のクライアントのリスト
+monitor_time_delay_clients = []  # 通信遅延監視用のクライアントのリスト
 
-# ログ設定
-logging.basicConfig(level=logging.INFO)
 
-# MongoDBクライアントの設定
-client = AsyncIOMotorClient("mongodb://localhost:27017")
-db = client.lidar_data
+# 🔹 **INFO 以下のログのみを `info.log` に記録するフィルタ**
+class Info_Filter(logging.Filter):
+    def filter(self, record):
+        return record.levelno < logging.WARNING  # INFO以下を許可
 
-def decompress_bin_data(byte_data):
-    angle_diffs = []
-    distance_diffs = []
+
+def logging_setup():
+    
+    global logger
+    
+    info_log_dir = "/app/logs/info_logs"
+    error_log_dir = "/app/logs/error_logs"
+    
+    os.makedirs(info_log_dir, exist_ok=True)
+    os.makedirs(error_log_dir, exist_ok=True)
+    
+    # ロガー作成
+    logger = logging.getLogger("MyLogger")
+    logger.setLevel(logging.DEBUG)  # すべてのログを処理対象にする
+
+    # 📂 **Liderデータ（DEBUGのみ）を `lider_data.log` に保存**
+    info_handler = logging.handlers.RotatingFileHandler(
+        os.path.join(info_log_dir, "info.log"),
+        encoding="utf-8",
+        maxBytes=1024*1024*10,
+        backupCount=5
+    )
+    info_handler.setLevel(logging.DEBUG)  # DEBUG 以上を記録（後でフィルタで制御）
+    # 📂 **エラーログ（ERROR 以上）を `error.log` に保存**
+    error_handler = logging.handlers.RotatingFileHandler(
+        os.path.join(error_log_dir, "error.log"),
+        encoding="utf-8",
+        maxBytes=1024*1024*10,
+        backupCount=5
+    )
+    error_handler.setLevel(logging.WARNING)  # WARNING 以上のみ記録
+    #console_handler = logging.StreamHandler()
+    #console_handler.setLevel(logging.DEBUG)
+
+    # 🔹 **フォーマット設定**
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    info_handler.setFormatter(formatter)
+    error_handler.setFormatter(formatter)
+    #console_handler.setFormatter(formatter)
+
+    # フィルタを適用
+    info_handler.addFilter(Info_Filter())
+
+    # 🔹 **ロガーにハンドラーを追加**
+    logger.addHandler(info_handler)
+    logger.addHandler(error_handler)
+    #logger.addHandler(console_handler)  # コンソール出力
+    logger.info("Logger setuped")
+
+
+def format_timestamp(timestamp_us):
+    """
+    クライアントから受信したマイクロ秒単位のUNIXタイムスタンプを
+    'HH:MM:SS.sss 遅延: X.XXX秒' の形式に変換する
+    """
+    timestamp_s = timestamp_us / 1e6  # マイクロ秒を秒単位に変換
+    utc_time = datetime.datetime.utcfromtimestamp(timestamp_s)  # UTC時間に変換
+    japan_time = utc_time + datetime.timedelta(hours=9)  # 日本時間(JST)に変換
+
+    now_us = int(time.time() * 1e6)  # 現在のタイムスタンプ（マイクロ秒単位）
+    delay_s = (now_us - timestamp_us) / 1e6  # 遅延（秒）
+
+    # 遅延が負の値になるのを防ぐ（通常は発生しないはず）
+    delay_s = max(0, delay_s)
+
+    formatted_time = japan_time.strftime("%H:%M:%S.%f")[:-3]  # 'HH:MM:SS.sss'（ミリ秒単位まで）
+    return f"Time: {formatted_time} Delay: {delay_s:.3f}sec"
+
+def decompress_data(data):
+    """
+    Decompress binary data into human-readable format.
+    """
+    decompressed = []
+    buffer = memoryview(data)
+    current_theta = None
+    current_dist = None
     bit_buffer = 0
     bit_count = 0
     data_index = 0
 
+    # 🔹 最後の64ビット（8バイト）をタイムスタンプとして取り出す
+    if len(buffer) < 8:
+        raise ValueError("Not enough data for timestamp")
+    
+    timestamp = struct.unpack(">Q", buffer[-8:])[0]  # 64ビット整数を取得
+    buffer = buffer[:-8]  # タイムスタンプ部分を除いたデータ
+
+
     def read_bits(num_bits):
-        nonlocal bit_buffer, bit_count, data_index
-        value = 0
-        while num_bits > 0:
-            if bit_count == 0:
-                if data_index < len(byte_data):
-                    bit_buffer = byte_data[data_index]
-                    data_index += 1
-                    bit_count = 8
-                else:
-                    break
-            
-            bits_to_take = min(bit_count, num_bits)
-            value = (value << bits_to_take) | (bit_buffer >> (bit_count - bits_to_take))
-            bit_buffer &= (1 << (bit_count - bits_to_take)) - 1
-            bit_count -= bits_to_take
-            num_bits -= bits_to_take
+        """
+        Helper function to read `num_bits` bits from `bit_buffer`.
+        """
+        nonlocal bit_buffer, bit_count, data_index, buffer
+        while bit_count < num_bits:
+            if data_index < len(buffer):
+                bit_buffer = (bit_buffer << 8) | buffer[data_index]
+                data_index += 1
+                bit_count += 8
+            else:
+                raise ValueError("Not enough data to read")
+        value = (bit_buffer >> (bit_count - num_bits)) & ((1 << num_bits) - 1)
+        bit_count -= num_bits
+
+        # 符号付き整数の補正
+        if value & (1 << (num_bits - 1)):
+            value -= (1 << num_bits)
+
         return value
 
-    # データを読み取る
-    while data_index < len(byte_data) or bit_count > 0:
-        # 角度データの処理
-        indicator_bit = read_bits(1)
-        if indicator_bit == 1:  # 角度差（3ビットの2の補数）
-            angle_diff = read_bits(3)
-            angle_diff = (angle_diff - 8) if angle_diff >= 4 else angle_diff  # 2の補数変換
-            angle_diffs.append(angle_diff)
-        else:  # 角度差（8ビット）
-            angle_diff = read_bits(9)  # 9ビットで処理
-            if angle_diff >= (1 << 8):  # 9ビットでの2の補数変換
-                angle_diff -= (1 << 9)
-            angle_diffs.append(angle_diff)
-
-        # 距離データの処理
-        indicator_bit = read_bits(1)
-        if indicator_bit == 1:  # 距離差（3ビットの2の補数）
-            dist_diff = read_bits(3)
-            dist_diff = (dist_diff - 8) if dist_diff >= 4 else dist_diff  # 2の補数変換
-            distance_diffs.append(dist_diff)
-        else:  # 距離差（15ビット）
-            dist_diff = read_bits(15)
-            if dist_diff >= (1 << 14):  # 15ビットの2の補数変換
-                dist_diff -= (1 << 15)
-            distance_diffs.append(dist_diff)
-
-    # 初期値の設定
-    decompressed_sequence = []
-    if not angle_diffs or not distance_diffs:
-        return decompressed_sequence
-
-    # 初期角度・距離
-    current_angle = angle_diffs[0]
-    current_distance = distance_diffs[0]
-    decompressed_sequence.append((current_angle, current_distance))
-
-    # 2番目の項以降を計算
-    for i in range(1, len(angle_diffs)):
-        if i == 1:
-            current_angle += angle_diffs[i]
-            current_distance += distance_diffs[i]
+    while data_index < len(buffer) or bit_count >= 11:
+        if current_theta is None:
+            # 初期値（11ビット角度 + 16ビット距離）
+            theta = read_bits(11)
+            dist = read_bits(16)
+            current_theta = theta / 100.0
+            current_dist = dist
         else:
-            current_angle += (angle_diffs[1] + sum(angle_diffs[2:i+1]))
-            current_distance += distance_diffs[i]
+            # 差分適用（11ビット角度差分 + 16ビット距離差分）
+            theta_diff = read_bits(11)
+            dist_diff = read_bits(16)
+            current_theta += theta_diff / 100.0
+            current_dist += dist_diff
 
-        # 最後の項目がすでにリストにある場合は追加しない
-        if i < len(angle_diffs) - 1 or decompressed_sequence[-1] != (current_angle, current_distance):
-            decompressed_sequence.append((current_angle, current_distance))
+        decompressed.append((current_theta, current_dist))
 
-    return decompressed_sequence
+    return timestamp, decompressed
 
+def filter_invalid_data(decompressed_data):
+    """
+    サーバー側でデータをフィルタリングして、異常な値を排除する
+    """
+    filtered_data = []
+    delete_data_count = 0
+    prev_theta = None
 
-def calculate_md5(file_content):
-    md5_hash = hashlib.md5()
-    md5_hash.update(file_content)
-    return md5_hash.hexdigest()
+    for theta, dist in decompressed_data:
+        # 角度の範囲チェック（0°～360°）
+        if not (0.0 <= theta <= 360.0):
+            logger.warning(f"Warning: Invalid theta value detected: {theta:.2f}, skipping...")
+            delete_data_count += 1
+            continue
 
-@app.post("/upload_lidar_data/")
-async def upload_lidar_data(file: UploadFile = File(...), file_hash: str = Form(...)):
+        # 距離の範囲チェック（0mm～10m = 0mm～10000mm）
+        if not (0 <= dist <= 14000):
+            logger.warning(f"Warning: Invalid distance value detected: {dist}, skipping...")
+            delete_data_count += 1
+            continue
+
+        # 角度の連続性チェック（急激なジャンプを排除）
+        if prev_theta is not None and abs(theta - prev_theta) > 100.0:
+            logger.warning(f"Warning: Sudden jump detected in theta values ({prev_theta:.2f} → {theta:.2f}), skipping...")
+            delete_data_count += 1
+            continue
+
+        filtered_data.append((theta, dist))
+        prev_theta = theta
+
+    return filtered_data, delete_data_count
+
+def handle_lidar_client(client_socket):
+    """
+    Handle incoming data from a LiDAR client.
+    """
     try:
-        contents = await file.read()
-        
-        # サーバー側で受信したファイルのハッシュ値を計算
-        server_file_hash = calculate_md5(contents)
-        
-        # クライアント側のハッシュ値と一致するかを確認
-        hash_match = server_file_hash == file_hash
+        buffer = bytearray()
+        while True:
+            data = client_socket.recv(8192)
+            if not data:
+                break
+            buffer.extend(data)
 
-        # ログにハッシュの一致状況を出力
-        logging.info(f"ファイル名: {file.filename}")
-        logging.info(f"サーバー側のハッシュ: {server_file_hash}")
-        logging.info(f"クライアント側のハッシュ: {file_hash}")
-        logging.info(f"ハッシュ一致: {'一致' if hash_match else '不一致'}")
-        
-        # ハッシュ値が一致しない場合はエラー
-        if not hash_match:
-            raise HTTPException(status_code=400, detail="ハッシュ値が一致しません。データが破損しています。")
-        
-        # バイナリデータを解凍して元の形式に戻す
-        decompressed_data = decompress_bin_data(contents)
-        
-        # 解凍されたデータを "received_data" ディレクトリの "receive_data.txt" に上書き
-        received_file_path = os.path.join("received_data", "receive_data.txt")
-        os.makedirs(os.path.dirname(received_file_path), exist_ok=True)
-        with open(received_file_path, "a") as f:  # "a"モードで追記
-            # 解凍されたデータを文字列に変換し、ファイルに書き込む
-            f.write("\n".join([f"theta: {angle / 100:.2f} Dist: {distance}" for angle, distance in decompressed_data]) + "\n")
+            send_message = str()
 
-        # 解凍されたデータの最初の10要素をログに出力
-        preview_data = decompressed_data[:10]
-        preview_str = "\n".join([f"theta: {angle / 100:.2f} Dist: {distance}" for angle, distance in preview_data])
-        logging.info(f"解凍されたデータの最初の10要素:\n{preview_str}")
+            try:
+                timestamp, decompressed_data = decompress_data(buffer)
+                total_data_count = len(decompressed_data)
+                send_message = f"\nReceived data count: {total_data_count}"
 
-        # データベースに保存する処理
-        collection = db["lidar_data"]
-        await collection.insert_one({
-            "filename": file.filename,
-            "data": Binary(contents)  # 元のバイナリデータを保存
-        })
+                # 🔹 追加: サーバー側で異常値をフィルタリング
+                filtered_data, delete_data_count = filter_invalid_data(decompressed_data)
 
-        return {"status": "success", "decompressed_data": decompressed_data, "hash_match": hash_match}
+                # データ数チェック
+                if len(filtered_data) < 300 or len(filtered_data) > 700:
+                    logger.warning(f"Warning: Skipping this rotation due to invalid data count: {len(filtered_data)}")
+                    timestamp_info = "\n" + format_timestamp(timestamp)
+                    delete_data_info = f"\nDelete data count: {total_data_count}"
+                    send_message += f"{delete_data_info}{timestamp_info}\n"
+                    for monitor_socket in monitor_time_delay_clients[:]:
+                        try:
+                            monitor_socket.sendall(send_message.encode("utf-8"))
+                        except Exception as e:
+                            logger.exception(f"send monitor time delay client is faild {e}")
+                    buffer = bytearray()  # バッファをリセット
+                    continue
+
+                # 🔹 タイムスタンプと遅延を追加して表示
+                human_readable = "\n".join([f"Theta: {theta:.2f}, Distance: {dist}" for theta, dist in filtered_data]) + "\n"
+                timestamp_info = "\n" + format_timestamp(timestamp)
+                delete_data_info = f"\nDelete data count: {delete_data_count}"
+                send_message += f"{delete_data_info}{timestamp_info}\n"
+                formatted_output = f"{human_readable}{timestamp_info}"
+                logger.debug(formatted_output)
+                print(formatted_output, end="")  # 余計な改行を防ぐ
+
+                # 監視用クライアントに送信
+                for monitor_socket in monitor_lidar_data_clients[:]:
+                    try:
+                        monitor_socket.sendall(human_readable.encode("utf-8"))
+                    except Exception as e:
+                        logger.exception(f"send monitor Lidar data client is faild {e}")
+                 
+                for monitor_socket in monitor_time_delay_clients[:]:
+                    try:
+                        monitor_socket.sendall(send_message.encode("utf-8"))
+                    except Exception as e:
+                        logger.exception(f"send monitor time delay client is faild {e}")
+
+
+                buffer = bytearray()  # Reset buffer after processing
+            except ValueError as e:
+                logger.exception(e)
+    
     except Exception as e:
-        logging.error(f"エラー発生: {str(e)}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail="ファイルのアップロード中にエラーが発生しました。")
+        logger.exception(e)
+    
+    finally:
+        client_socket.close()
+        logger.warning("LiDAR Client disconnected")
 
-# サーバーを立ち上げるmain関数
+def handle_monitor_client(monitor_socket, address, monitor_clients):
+    """
+    Handle a client connected to the monitoring port (8001).
+    """
+    logger.info(f"Monitoring client connected: {address}")
+    monitor_clients.append(monitor_socket)
+    try:
+        while True:
+            data = monitor_socket.recv(1024)  # Keep connection open for streaming
+            if not data:
+                break
+    except Exception as e:
+        logger.exception(e)
+    finally:
+        monitor_clients.remove(monitor_socket)
+        monitor_socket.close()
+        logger.warning(f"Monitoring client disconnected: {address}")
+
+
+def monitor_lidar_data_server(port=8001):
+    """
+    Start a separate monitoring server to allow clients to view LiDAR data.
+    """
+    global monitor_lidar_data_clients
+    monitor_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    monitor_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    monitor_socket.bind(("0.0.0.0", port))
+    monitor_socket.listen()
+    logger.info(f"Lidar Data Monitoring server listening on port {port}")
+
+    while True:
+        try:
+            client_socket, address = monitor_socket.accept()
+            threading.Thread(target=handle_monitor_client, args=(client_socket, address, monitor_lidar_data_clients), daemon=True).start()
+        except Exception as e:
+            logger.exception(f"Error accepting client connection: {e}")
+            
+
+def monitor_time_delay_server(port=8002):
+    """
+    Start a separate monitoring server to allow clients to view Time and delay.
+    """
+    global monitor_time_delay_clients
+    monitor_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    monitor_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    monitor_socket.bind(("0.0.0.0", port))
+    monitor_socket.listen()
+    logger.info(f"Lidar Data Monitoring server listening on port {port}")
+
+    while True:
+        try:
+            client_socket, address = monitor_socket.accept()
+            threading.Thread(target=handle_monitor_client, args=(client_socket, address, monitor_time_delay_clients), daemon=True).start()
+        except Exception as e:
+            logger.exception(f"Error accepting client connection: {e}")
+
+
+def lidar_server_main(lidar_port=8000, monitor_port=[8001, 8002]):
+    """
+    Start the main server for LiDAR data and monitoring.
+    """
+    logging_setup()
+    threading.Thread(target=monitor_lidar_data_server, args=(monitor_port[0],), daemon=True).start()
+    threading.Thread(target=monitor_time_delay_server, args=(monitor_port[1],), daemon=True).start()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind(("0.0.0.0", lidar_port))
+        server_socket.listen()
+        logger.info(f"LiDAR server listening on port {lidar_port}")
+
+        while True:
+            client_socket, _ = server_socket.accept()
+            threading.Thread(target=handle_lidar_client, args=(client_socket,), daemon=True).start()
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    lidar_server_main()

@@ -37,26 +37,26 @@ info.logの一部
 
 error.logの一部
 
-![image](client_error_log.png)
+![image](images/client_error_log.png)
 
 server.pyでは実行すると以下のような出力がされます．
 
 info.logの一部
 
-![image](server_info_log.png)
+![image](images/server_info_log.png)
 
 
 error.logの一部
-![image](server_error_log.png)
+![image](images/server_error_log.png)
 
 
 client.pyとserver.pyを実行すると以下のような表示が8001，8002番ポートに出力されます．  
 
 8001番ポート
 
-![image]()
+![image](images/port8001_output.png)
 
 
 8002番ポート
 
-![image]()
+![image](images/port8002_output.png)

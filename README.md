@@ -29,9 +29,11 @@ server.pyをKubernetes上で動作させるためのserviceを起動するため
 
 # 実行結果
 client.pyでは以下のような表示されます．
+info.logの一部
+![image](client_info_log.png)
 
-![image](https://github.com/user-attachments/assets/591c14ee-22e7-46e3-8a91-924db612436f)
-
+error.logの一部
+![image](client_error_log.png)
 
 server.pyでは実行すると以下のようなサーバーが立ち上がった旨の表示があります．
 

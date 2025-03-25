@@ -6,25 +6,81 @@ import time
 import datetime
 import logging
 import os
-
-monitor_lidar_data_clients = []  # Lidarデータ監視用のクライアントのリスト
-monitor_time_delay_clients = []  # 通信遅延監視用のクライアントのリスト
+import queue
 
 
-# 🔹 **INFO 以下のログのみを `info.log` に記録するフィルタ**
-class Info_Filter(logging.Filter):
+# 🔹 **DEBUGのログのみを `lidar_data.log` に記録するフィルタ**
+class DEBUG_Filter(logging.Filter):
     def filter(self, record):
-        return record.levelno < logging.WARNING  # INFO以下を許可
+        return record.levelno < logging.INFO  # INFO未満を許可
+
+
+class MonitorClientHandler:
+    def __init__(self, client_socket):
+        self.client_socket = client_socket
+        self.message_queue = queue.Queue()
+        self.running = True
+
+        self.thread = threading.Thread(target=self._send_messages, daemon=True)
+        self.thread.start()
+
+    def _send_messages(self):
+        logger.info(f"Send to {self.client_socket} thread is starting")
+        while self.running:
+            try:
+                message = self.message_queue.get()  # キューからメッセージを取得（ブロッキング）
+                if message is None:
+                    pass
+
+                self.client_socket.sendall(message.encode("utf-8"))
+            except (socket.error, BrokenPipeError, ConnectionResetError) as e:
+                logger.exception(f"thread stop:{e}")
+                break  # 送信エラーでスレッドを停止
+        self.client_socket.close()
+
+    def send(self, message):
+        self.message_queue.put(message)  # メッセージをキューに追加
+
+    def stop(self):
+        self.running = False
+        self.message_queue.put(None)  # Noneを送ってスレッド終了
+        self.thread.join()
+
+# 監視クライアントの管理
+class MonitorManager:
+    def __init__(self):
+        self.clients_8001 = []  # 8001のクライアント
+        self.clients_8002 = []  # 8002のクライアント
+
+    def add_client(self, client_socket, port):
+        handler = MonitorClientHandler(client_socket)
+        if port == 8001:
+            self.clients_8001.append(handler)
+        elif port == 8002:
+            self.clients_8002.append(handler)
+
+    def broadcast_8001(self, message):
+        """8001番ポートのクライアントにメッセージを送信"""
+        for client in self.clients_8001:
+            client.send(message)
+
+    def broadcast_8002(self, message):
+        """8002番ポートのクライアントにメッセージを送信"""
+        for client in self.clients_8002:
+            client.send(message)
+
+
+monitor_manager = MonitorManager()
 
 
 def logging_setup():
     
     global logger
     
-    info_log_dir = "/app/logs/info_logs"
-    error_log_dir = "/app/logs/error_logs"
+    lidar_data_dir = "./logs/lidar_datas"
+    error_log_dir = "./logs/error_logs"
     
-    os.makedirs(info_log_dir, exist_ok=True)
+    os.makedirs(lidar_data_dir, exist_ok=True)
     os.makedirs(error_log_dir, exist_ok=True)
     
     # ロガー作成
@@ -32,13 +88,13 @@ def logging_setup():
     logger.setLevel(logging.DEBUG)  # すべてのログを処理対象にする
 
     # 📂 **Liderデータ（DEBUGのみ）を `lider_data.log` に保存**
-    info_handler = logging.handlers.RotatingFileHandler(
-        os.path.join(info_log_dir, "info.log"),
+    lidar_data_handler = logging.handlers.RotatingFileHandler(
+        os.path.join(lidar_data_dir, "lidar_data.log"),
         encoding="utf-8",
         maxBytes=1024*1024*10,
         backupCount=5
     )
-    info_handler.setLevel(logging.DEBUG)  # DEBUG 以上を記録（後でフィルタで制御）
+    lidar_data_handler.setLevel(logging.DEBUG)
     # 📂 **エラーログ（ERROR 以上）を `error.log` に保存**
     error_handler = logging.handlers.RotatingFileHandler(
         os.path.join(error_log_dir, "error.log"),
@@ -46,21 +102,21 @@ def logging_setup():
         maxBytes=1024*1024*10,
         backupCount=5
     )
-    error_handler.setLevel(logging.WARNING)  # WARNING 以上のみ記録
+    error_handler.setLevel(logging.INFO)  # INFO 以上のみ記録
     #console_handler = logging.StreamHandler()
     #console_handler.setLevel(logging.DEBUG)
 
     # 🔹 **フォーマット設定**
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    info_handler.setFormatter(formatter)
+    lidar_data_handler.setFormatter(formatter)
     error_handler.setFormatter(formatter)
     #console_handler.setFormatter(formatter)
 
     # フィルタを適用
-    info_handler.addFilter(Info_Filter())
+    lidar_data_handler.addFilter(DEBUG_Filter())
 
     # 🔹 **ロガーにハンドラーを追加**
-    logger.addHandler(info_handler)
+    logger.addHandler(lidar_data_handler)
     logger.addHandler(error_handler)
     #logger.addHandler(console_handler)  # コンソール出力
     logger.info("Logger setuped")
@@ -84,6 +140,7 @@ def format_timestamp(timestamp_us):
     formatted_time = japan_time.strftime("%H:%M:%S.%f")[:-3]  # 'HH:MM:SS.sss'（ミリ秒単位まで）
     return f"Time: {formatted_time} Delay: {delay_s:.3f}sec"
 
+
 def decompress_data(data):
     """
     Decompress binary data into human-readable format.
@@ -103,12 +160,12 @@ def decompress_data(data):
     timestamp = struct.unpack(">Q", buffer[-8:])[0]  # 64ビット整数を取得
     buffer = buffer[:-8]  # タイムスタンプ部分を除いたデータ
 
-
     def read_bits(num_bits):
         """
         Helper function to read `num_bits` bits from `bit_buffer`.
         """
         nonlocal bit_buffer, bit_count, data_index, buffer
+
         while bit_count < num_bits:
             if data_index < len(buffer):
                 bit_buffer = (bit_buffer << 8) | buffer[data_index]
@@ -116,6 +173,7 @@ def decompress_data(data):
                 bit_count += 8
             else:
                 raise ValueError("Not enough data to read")
+        
         value = (bit_buffer >> (bit_count - num_bits)) & ((1 << num_bits) - 1)
         bit_count -= num_bits
 
@@ -124,6 +182,7 @@ def decompress_data(data):
             value -= (1 << num_bits)
 
         return value
+
 
     while data_index < len(buffer) or bit_count >= 11:
         if current_theta is None:
@@ -138,6 +197,17 @@ def decompress_data(data):
             dist_diff = read_bits(16)
             current_theta += theta_diff / 100.0
             current_dist += dist_diff
+
+        if current_theta == 0:
+            continue
+        if current_theta < 0:
+            current_theta += 360
+        if current_theta > 360:
+            current_theta %= 360
+
+        if current_dist < 0 or current_dist > 12000:
+            logger.warning(f"Invalid distance detected: {current_dist}, correcting...")
+            continue
 
         decompressed.append((current_theta, current_dist))
 
@@ -175,6 +245,7 @@ def filter_invalid_data(decompressed_data):
 
     return filtered_data, delete_data_count
 
+
 def handle_lidar_client(client_socket):
     """
     Handle incoming data from a LiDAR client.
@@ -182,7 +253,7 @@ def handle_lidar_client(client_socket):
     try:
         buffer = bytearray()
         while True:
-            data = client_socket.recv(8192)
+            data = client_socket.recv(4096)
             if not data:
                 break
             buffer.extend(data)
@@ -203,12 +274,10 @@ def handle_lidar_client(client_socket):
                     timestamp_info = "\n" + format_timestamp(timestamp)
                     delete_data_info = f"\nDelete data count: {total_data_count}"
                     send_message += f"{delete_data_info}{timestamp_info}\n"
-                    for monitor_socket in monitor_time_delay_clients[:]:
-                        try:
-                            monitor_socket.sendall(send_message.encode("utf-8"))
-                        except Exception as e:
-                            logger.exception(f"send monitor time delay client is faild {e}")
-                    buffer = bytearray()  # バッファをリセット
+
+                    monitor_manager.broadcast_8002(send_message)
+
+                    buffer.clear()  # バッファをリセット
                     continue
 
                 # 🔹 タイムスタンプと遅延を追加して表示
@@ -218,25 +287,15 @@ def handle_lidar_client(client_socket):
                 send_message += f"{delete_data_info}{timestamp_info}\n"
                 formatted_output = f"{human_readable}{timestamp_info}"
                 logger.debug(formatted_output)
-                print(formatted_output, end="")  # 余計な改行を防ぐ
+                #print(formatted_output, end="")  # 余計な改行を防ぐ
 
                 # 監視用クライアントに送信
-                for monitor_socket in monitor_lidar_data_clients[:]:
-                    try:
-                        monitor_socket.sendall(human_readable.encode("utf-8"))
-                    except Exception as e:
-                        logger.exception(f"send monitor Lidar data client is faild {e}")
-                 
-                for monitor_socket in monitor_time_delay_clients[:]:
-                    try:
-                        monitor_socket.sendall(send_message.encode("utf-8"))
-                    except Exception as e:
-                        logger.exception(f"send monitor time delay client is faild {e}")
+                monitor_manager.broadcast_8001(human_readable)
+                monitor_manager.broadcast_8002(send_message)
 
-
-                buffer = bytearray()  # Reset buffer after processing
-            except ValueError as e:
-                logger.exception(e)
+                buffer.clear()  # Reset buffer after processing
+            except ValueError:
+                pass
     
     except Exception as e:
         logger.exception(e)
@@ -245,23 +304,20 @@ def handle_lidar_client(client_socket):
         client_socket.close()
         logger.warning("LiDAR Client disconnected")
 
-def handle_monitor_client(monitor_socket, address, monitor_clients):
+def handle_monitor_client(monitor_socket, address, port):
     """
-    Handle a client connected to the monitoring port (8001).
+    Handle a client connected to the monitoring port.
     """
     logger.info(f"Monitoring client connected: {address}")
-    monitor_clients.append(monitor_socket)
-    try:
-        while True:
-            data = monitor_socket.recv(1024)  # Keep connection open for streaming
-            if not data:
-                break
-    except Exception as e:
-        logger.exception(e)
-    finally:
-        monitor_clients.remove(monitor_socket)
-        monitor_socket.close()
-        logger.warning(f"Monitoring client disconnected: {address}")
+    monitor_manager.add_client(monitor_socket, port)
+    while True:
+        try:
+            data = monitor_socket.recv(1024)
+        except Exception as e:
+            logger.exception(e)
+            break
+
+    logger.warning(f"Monitoring client disconnected: {address}")
 
 
 def monitor_lidar_data_server(port=8001):
@@ -278,7 +334,7 @@ def monitor_lidar_data_server(port=8001):
     while True:
         try:
             client_socket, address = monitor_socket.accept()
-            threading.Thread(target=handle_monitor_client, args=(client_socket, address, monitor_lidar_data_clients), daemon=True).start()
+            threading.Thread(target=handle_monitor_client, args=(client_socket, address, port), daemon=True).start()
         except Exception as e:
             logger.exception(f"Error accepting client connection: {e}")
             
@@ -297,7 +353,7 @@ def monitor_time_delay_server(port=8002):
     while True:
         try:
             client_socket, address = monitor_socket.accept()
-            threading.Thread(target=handle_monitor_client, args=(client_socket, address, monitor_time_delay_clients), daemon=True).start()
+            threading.Thread(target=handle_monitor_client, args=(client_socket, address, port), daemon=True).start()
         except Exception as e:
             logger.exception(f"Error accepting client connection: {e}")
 

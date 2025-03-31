@@ -17,23 +17,23 @@ class DEBUG_Filter(logging.Filter):
 
 
 class MonitorClientHandler:
-    def __init__(self, client_socket):
+    def __init__(self, client_socket, monitor_manager):
         self.client_socket = client_socket
         self.message_queue = queue.Queue()
-        self.error_num = 0
 
-        self.thread = threading.Thread(target=self._send_messages, daemon=True)
+        self.thread = threading.Thread(target=self._send_messages, args=(monitor_manager,), daemon=True)
         self.thread.start()
 
-    def _send_messages(self):
+    def _send_messages(self, monitor_manager):
         logger.info(f"Send to {self.client_socket} thread is starting")
-        while self.error_num < 10:
+        while True:
             try:
                 message = self.message_queue.get()  # キューからメッセージを取得（ブロッキング）
 
                 self.client_socket.sendall(message.encode("utf-8"))
             except (socket.error, BrokenPipeError, ConnectionResetError) as e:
                 logger.exception(f"thread stop:{e}")
+                monitor_manager.delete_client(self)
                 break
 
         self.client_socket.close()
@@ -53,8 +53,8 @@ class MonitorManager:
         self.clients_8001 = []  # 8001のクライアント
         self.clients_8002 = []  # 8002のクライアント
 
-    def add_client(self, client_socket, port):
-        handler = MonitorClientHandler(client_socket)
+    def add_client(self, client_socket, port, monitor_manager):
+        handler = MonitorClientHandler(client_socket, monitor_manager)
         if port == 8001:
             self.clients_8001.append(handler)
         elif port == 8002:
@@ -248,6 +248,7 @@ def handle_lidar_client(client_socket):
     """
     Handle incoming data from a LiDAR client.
     """
+    logger.info("LiDAR Client connected")
     try:
         buffer = bytearray()
         while True:
@@ -319,7 +320,7 @@ def monitor_lidar_data_server(port=8001):
     while True:
         try:
             client_socket, address = monitor_socket.accept()
-            monitor_manager.add_client(client_socket, port)
+            monitor_manager.add_client(client_socket, port, monitor_manager)
         except Exception as e:
             logger.exception(f"Error accepting client connection: {e}")
 
@@ -338,7 +339,7 @@ def monitor_time_delay_server(port=8002):
     while True:
         try:
             client_socket, address = monitor_socket.accept()
-            monitor_manager.add_client(client_socket, port)
+            monitor_manager.add_client(client_socket, port, monitor_manager)
         except Exception as e:
             logger.exception(f"Error accepting client connection: {e}")
 
@@ -357,9 +358,11 @@ def lidar_server_main(lidar_port=8000, monitor_port=[8001, 8002]):
         server_socket.listen()
         logger.info(f"LiDAR server listening on port {lidar_port}")
 
+        #Lidarとの接続が切れて handle_lidar_client が終了した時に再接続
         while True:
             client_socket, _ = server_socket.accept()
-            threading.Thread(target=handle_lidar_client, args=(client_socket,), daemon=True).start()
+            handle_lidar_client(client_socket)
+
 
 if __name__ == "__main__":
     lidar_server_main()
